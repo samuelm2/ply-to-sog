@@ -5,13 +5,13 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include "GaussianCloud.hpp"
+#include <miniz.h>
 #include "SogEncoder.hpp"
 
 namespace fs = std::filesystem;
 
 void print_usage() {
-    std::cout << "Usage: splat-converter <input.ply> <output_path> [options]\n";
+    std::cout << "Usage: ply-to-sog <input.ply> <output_path> [options]\n";
     std::cout << "Options:\n";
     std::cout << "  --bundle       Create a bundled .sog file (zip)\n";
     std::cout << "  --sh-iter <N>  K-Means iterations for SH (default: 2)\n";
@@ -70,17 +70,40 @@ int main(int argc, char** argv) {
         
         if (bundle) {
             std::cout << "Bundling into " << output_path << "..." << std::endl;
-            // Use system zip command
-            // -j: junk paths (store just filenames), -r: recursive (not strictly needed for flat)
-            // -q: quiet
-            std::string cmd = "zip -j -q " + output_path + " " + out_dir.string() + "/*";
-            int ret = std::system(cmd.c_str());
-            if (ret != 0) {
-                std::cerr << "Warning: zip command failed with code " << ret << std::endl;
-            } else {
-                // Cleanup
-                fs::remove_all(out_dir);
+            
+            mz_zip_archive zip_archive;
+            memset(&zip_archive, 0, sizeof(zip_archive));
+
+            if (!mz_zip_writer_init_file(&zip_archive, output_path.c_str(), 0)) {
+                throw std::runtime_error("Failed to create zip file");
             }
+
+            for (const auto& entry : fs::directory_iterator(out_dir)) {
+                if (entry.is_regular_file()) {
+                    std::string filename = entry.path().filename().string();
+                    std::string ext = entry.path().extension().string();
+                    
+                    int level = MZ_BEST_COMPRESSION;
+                    if (ext == ".webp") {
+                        level = MZ_NO_COMPRESSION;
+                    }
+
+                    if (!mz_zip_writer_add_file(&zip_archive, filename.c_str(), entry.path().string().c_str(), nullptr, 0, level)) {
+                         mz_zip_writer_end(&zip_archive);
+                         throw std::runtime_error("Failed to add file to zip: " + filename);
+                    }
+                }
+            }
+
+            if (!mz_zip_writer_finalize_archive(&zip_archive)) {
+                mz_zip_writer_end(&zip_archive);
+                throw std::runtime_error("Failed to finalize zip archive");
+            }
+
+            mz_zip_writer_end(&zip_archive);
+            
+            // Cleanup
+            fs::remove_all(out_dir);
         }
         
         auto end_time = std::chrono::high_resolution_clock::now();

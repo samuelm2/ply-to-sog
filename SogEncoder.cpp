@@ -623,25 +623,9 @@ nlohmann::json SogEncoder::encode_sh() {
     // JS tool seems to default to Band 2 (8 coeffs)?
     // Let's just process what we have, but ensure we don't crash if 45.
     
-    int input_coeffs = cloud_.sh_rest.cols() / 3;
-    int target_coeffs = input_coeffs;
-    
-    // Explicitly support truncating to Band 2 (8 coeffs) if input is Band 3 (15 coeffs)
-    // To match JS default behavior if that's what user wants.
-    // transform.ts: const shBands = options.shBands ?? 3; (Defaults to 3?)
-    // User log showed dims=24 -> 8 coeffs -> Band 2.
-    // Maybe user passed --sh-bands 2 ?
-    // Or maybe input PLY was Band 2.
-    
-    // Let's assume we proceed with `target_coeffs`.
-    
     std::cout << "Compressing SH: " << cloud_.sh_rest.rows() << " points, " << cloud_.sh_rest.cols() << " dims." << std::endl;
 
     // Run Vector K-Means
-    // Convert to proper matrix format or just use raw data access if careful.
-    // K-Means expects N x Dim. Here Dim = sh_coeffs * 3 (e.g., 45 for band 3).
-    // Note: TS clusters "shDataTable", which has columns f_rest_0...44.
-    
     auto km_sh = kmeans_vec(cloud_.sh_rest, palette_size, cloud_.sh_rest.cols(), options_.sh_iterations);
     
     // Write Centroids Texture
@@ -650,6 +634,9 @@ nlohmann::json SogEncoder::encode_sh() {
     // Layout: Rows of 64 centroids. Each centroid spans `shCoeffs` pixels horizontally.
     // Pixel (x, y) contains (c_r, c_g, c_b, 0xff).
     
+    int input_coeffs = cloud_.sh_rest.cols() / 3;
+    int target_coeffs = input_coeffs;
+
     int tex_width = 64 * input_coeffs;
     int tex_height = (km_sh.centroids.size() / (cloud_.sh_rest.cols()) + 63) / 64; // num_centroids / 64
     
@@ -737,17 +724,7 @@ nlohmann::json SogEncoder::encode_sh() {
 
     return {
         {"count", num_centroids},
-        {"bands", (target_coeffs == 3 ? 1 : (target_coeffs == 8 ? 2 : (target_coeffs == 15 ? 3 : 0)))}, // 1 -> 9 coeffs (3 bands), 2 -> 16? No.
-        // TS: shBands = {'9': 1, '24': 2, '-1': 3} mapping from column absence?
-        // Coeffs: 3 (band 1 has 3+1? No. Band 0: 1. Band 1: 3. Band 2: 5. Band 3: 7.)
-        // Total coeffs: 1, 4, 9, 16.
-        // SH_DC is 1 (3 dims).
-        // SH_REST has 3 coeffs * 3 dims for Band 1 (total 9 floats). Band 2 adds 5*3=15 floats.
-        // TS logic assumes sh_rest has:
-        // Band 1: 3 coeffs (x3) = 9
-        // Band 2: 8 coeffs (x3) = 24  (3 from band 1 + 5 from band 2 = 8 total rest coeffs)
-        // Band 3: 15 coeffs (x3) = 45 (3 + 5 + 7 = 15 total rest coeffs)
-        // Correct.
+        {"bands", (target_coeffs == 3 ? 1 : (target_coeffs == 8 ? 2 : (target_coeffs == 15 ? 3 : 0)))},
         {"codebook", km_codebook.centroids},
         {"files", {"shN_centroids.webp", "shN_labels.webp"}}
     };
