@@ -1,0 +1,22 @@
+# Build directories
+build/
+cmake-build-debug/
+bin/
+lib/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Generated files
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Local configuration
+CMakeUserPresets.json
+test_assets/*
