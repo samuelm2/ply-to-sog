@@ -15,15 +15,12 @@ public:
     struct Options {
         std::string output_path;
         bool bundle = false;
-        int k_means_iterations = 2; // K-means iterations (default low for speed)
+        int sh_iterations = 10;    // K-means iterations for SH vectors (default lower for speed)
         int width_hint = 0; // 0 = auto
     };
 
     // Standard constructor (encodes entire cloud)
     SogEncoder(const GaussianCloud& cloud, const Options& options);
-
-    // Subset constructor (encodes only specified indices)
-    SogEncoder(const GaussianCloud& cloud, const std::vector<size_t>& subset_indices, const Options& options);
     
     // Main entry point
     void encode();

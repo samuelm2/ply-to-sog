@@ -14,7 +14,7 @@ void print_usage() {
     std::cout << "Usage: ply-to-sog <input.ply> <output_path> [options]\n";
     std::cout << "Options:\n";
     std::cout << "  --bundle       Create a bundled .sog file (zip)\n";
-    std::cout << "  --k-means-iter <N>  K-Means iterations for SH/Scales/Colors (default: 2, recommended: 50+)\n";
+    std::cout << "  --sh-iter      <N>  K-Means iterations for SH clustering (default: 10)\n";
 }
 
 int main(int argc, char** argv) {
@@ -26,24 +26,32 @@ int main(int argc, char** argv) {
     std::string input_path = argv[1];
     std::string output_path = argv[2];
     bool bundle = false;
-    int sh_iter = 2;
+    
+    // Default values
+    int sh_iter = 10;
 
     for (int i = 3; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--bundle") {
             bundle = true;
         } else if (arg == "--k-means-iter" && i + 1 < argc) {
+             // Legacy support: map to sh-iter
+             sh_iter = std::stoi(argv[++i]);
+        } else if (arg == "--sh-iter" && i + 1 < argc) {
             sh_iter = std::stoi(argv[++i]);
+        } else if (arg == "--scale-iter" && i + 1 < argc) {
+            std::cout << "Warning: --scale-iter is deprecated. Scales now use optimal quantization." << std::endl;
+            i++; // skip value
         }
     }
 
     try {
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        std::cout << "Loading PLY: " << input_path << std::endl;
+        std::cout << "reading '" << input_path << "'..." << std::endl;
         GaussianCloud cloud = GaussianCloud::load_ply(input_path);
         
-        std::cout << "Loaded " << cloud.size() << " gaussians." << std::endl;
+        std::cout << "Loaded " << cloud.size() << " gaussians" << std::endl;
         
         fs::path out_dir; 
         if (bundle) {
@@ -56,6 +64,8 @@ int main(int argc, char** argv) {
             auto now = std::chrono::system_clock::now().time_since_epoch().count();
             out_dir = fs::path(output_path).parent_path() / ("tmp_" + fs::path(output_path).stem().string() + "_" + std::to_string(now));
             fs::create_directories(out_dir);
+            
+            std::cout << "writing '" << output_path << "'..." << std::endl;
 
         } else {
             out_dir = output_path;
@@ -64,15 +74,16 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("Output directory already exists and is not empty: " + output_path);
             }
             fs::create_directories(out_dir);
+            std::cout << "writing '" << output_path << "'..." << std::endl;
         }
 
         // Standard bundle/unbundle
         SogEncoder::Options options;
         options.output_path = out_dir.string();
         options.bundle = bundle;
-        options.k_means_iterations = sh_iter;
+        options.sh_iterations = sh_iter;
         
-        std::cout << "Encoding to " << (bundle ? "bundled SOG" : "SOG directory") << "..." << std::endl;
+        // std::cout << "Encoding to " << (bundle ? "bundled SOG" : "SOG directory") << "..." << std::endl;
         SogEncoder encoder(cloud, options);
         encoder.encode();
         

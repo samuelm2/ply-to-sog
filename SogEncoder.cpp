@@ -38,78 +38,169 @@ inline uint32_t morton3D(float x, float y, float z, const Eigen::Vector3f& min, 
     return xx * 4 + yy * 2 + zz;
 }
 
-// K-Means 1D
+// Quantize 1D using DP (Optimal 1D K-Means)
 struct KMeansResult1D {
     std::vector<float> centroids;
     std::vector<uint8_t> labels; // 256 max
 };
 
-KMeansResult1D kmeans1d(const std::vector<float>& data, int k, int iterations = 10) {
-    if (data.empty()) return {};
-    k = std::min(k, (int)data.size()); // clamp k
+// Helper for range queries
+struct RangeQuery {
+    std::vector<double> prefW, prefWX, prefWXX;
+    std::vector<double> centers;
     
-    // Initialize centroids using quantiles
-    std::vector<float> centroids(k);
-    std::vector<float> sorted_sample = data;
-    std::sort(sorted_sample.begin(), sorted_sample.end());
-    for (int i=0; i<k; ++i) {
-        centroids[i] = sorted_sample[i * sorted_sample.size() / k];
+    RangeQuery(int H) : prefW(H+1, 0), prefWX(H+1, 0), prefWXX(H+1, 0), centers(H) {}
+    
+    double cost(int a, int b) const {
+        double w = prefW[b+1] - prefW[a];
+        if (w <= 0) return 0.0;
+        double wx = prefWX[b+1] - prefWX[a];
+        double wxx = prefWXX[b+1] - prefWXX[a];
+        return wxx - (wx * wx) / w;
     }
     
-    std::vector<uint8_t> labels(data.size());
-    std::vector<double> sums(k, 0.0);
-    std::vector<int> counts(k, 0);
+    float mean(int a, int b) const {
+        double w = prefW[b+1] - prefW[a];
+        if (w <= 0) return (float)((centers[a] + centers[b]) * 0.5);
+        return (float)((prefWX[b+1] - prefWX[a]) / w);
+    }
+};
 
-    for (int iter = 0; iter < iterations; ++iter) {
-        // Assignment
-        #pragma omp parallel for
+KMeansResult1D quantize1d(const std::vector<float>& data, int k, float alpha = 0.5f) {
+    if (data.empty()) return {};
+
+    // 1. Find min/max
+    float min_val = std::numeric_limits<float>::max();
+    float max_val = std::numeric_limits<float>::lowest();
+    
+    #pragma omp parallel for reduction(min:min_val) reduction(max:max_val)
+    for (size_t i = 0; i < data.size(); ++i) {
+        if (data[i] < min_val) min_val = data[i];
+        if (data[i] > max_val) max_val = data[i];
+    }
+    
+    // Handle degenerate case
+    if (max_val - min_val < 1e-20f) {
+        return {std::vector<float>(k, min_val), std::vector<uint8_t>(data.size(), 0)};
+    }
+    
+    // 2. Build Histogram
+    const int H = 1024;
+    float bin_width = (max_val - min_val) / H;
+    std::vector<double> counts(H, 0.0);
+    std::vector<double> sums(H, 0.0);
+    
+    // Parallel histogram build using thread-local accumulation
+    #pragma omp parallel
+    {
+        std::vector<double> local_counts(H, 0.0);
+        std::vector<double> local_sums(H, 0.0);
+        
+        #pragma omp for
         for (size_t i = 0; i < data.size(); ++i) {
-            float val = data[i];
-            float min_dist = std::numeric_limits<float>::max();
-            int best_c = 0;
-            for (int j = 0; j < k; ++j) {
-                float dist = std::abs(val - centroids[j]);
-                if (dist < min_dist) {
-                    min_dist = dist;
-                    best_c = j;
+            int bin = std::min(H - 1, (int)((data[i] - min_val) / bin_width));
+            local_counts[bin]++;
+            local_sums[bin] += data[i];
+        }
+        
+        #pragma omp critical
+        {
+            for (int i=0; i<H; ++i) {
+                counts[i] += local_counts[i];
+                sums[i] += local_sums[i];
+            }
+        }
+    }
+    
+    // 3. Compute bin centers and weights
+    RangeQuery rq(H);
+    std::vector<double> weights(H);
+    
+    for (int i=0; i<H; ++i) {
+        rq.centers[i] = counts[i] > 0 ? sums[i] / counts[i] : (min_val + (i + 0.5f) * bin_width);
+        weights[i] = counts[i] > 0 ? std::pow(counts[i], (double)alpha) : 0.0;
+    }
+    
+    // Prefix sums
+    for (int i=0; i<H; ++i) {
+        rq.prefW[i+1] = rq.prefW[i] + weights[i];
+        rq.prefWX[i+1] = rq.prefWX[i] + weights[i] * rq.centers[i];
+        rq.prefWXX[i+1] = rq.prefWXX[i] + weights[i] * rq.centers[i] * rq.centers[i];
+    }
+    
+    // 4. Dynamic Programming
+    int nonEmpty = 0;
+    for (double c : counts) if (c > 0) nonEmpty++;
+    int effectiveK = std::min(k, nonEmpty);
+    
+    const double INF = 1e30;
+    std::vector<double> dpPrev(H, INF);
+    std::vector<double> dpCurr(H, INF);
+    std::vector<std::vector<int>> splitTable(effectiveK + 1, std::vector<int>(H, 0));
+    
+    // k = 1 base case
+    for (int j=0; j<H; ++j) {
+        dpPrev[j] = rq.cost(0, j);
+        splitTable[1][j] = -1;
+    }
+    
+    // k = 2..effectiveK — O(K * H^2) with O(1) range cost queries
+    for (int m = 2; m <= effectiveK; ++m) {
+        #pragma omp parallel for
+        for (int j = m - 1; j < H; ++j) {
+            double bestCost = INF;
+            int bestS = m - 2;
+            
+            for (int s = m - 2; s < j; ++s) {
+                double cost = dpPrev[s] + rq.cost(s + 1, j);
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    bestS = s;
                 }
             }
-            labels[i] = best_c;
+            dpCurr[j] = bestCost;
+            splitTable[m][j] = bestS;
         }
         
-        // Update
-        std::fill(sums.begin(), sums.end(), 0.0);
-        std::fill(counts.begin(), counts.end(), 0);
-        
-        for (size_t i = 0; i < data.size(); ++i) {
-            sums[labels[i]] += data[i];
-            counts[labels[i]]++;
-        }
-        
-        for (int j = 0; j < k; ++j) {
-            if (counts[j] > 0) {
-                centroids[j] = sums[j] / counts[j];
+        dpPrev = dpCurr;
+        std::fill(dpCurr.begin(), dpCurr.end(), INF);
+    }
+    
+    // 5. Backtrack centroids
+    std::vector<float> centroids(effectiveK);
+    int j = H - 1;
+    for (int m = effectiveK; m >= 1; --m) {
+        int s = (m > 1) ? splitTable[m][j] : -1;
+        centroids[m-1] = rq.mean(s + 1, j);
+        j = s;
+    }
+    std::sort(centroids.begin(), centroids.end());
+    
+    // Pad centroids if needed
+    std::vector<float> finalCentroids(k);
+    for (int i=0; i<effectiveK; ++i) finalCentroids[i] = centroids[i];
+    for (int i=effectiveK; i<k; ++i) finalCentroids[i] = centroids.back();
+    
+    // 6. Assign labels via binary search
+    std::vector<uint8_t> labels(data.size());
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < data.size(); ++i) {
+        float val = data[i];
+        int lo = 0;
+        int hi = k - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (val < (finalCentroids[mid] + finalCentroids[mid+1]) * 0.5f) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
             }
         }
+        labels[i] = (uint8_t)lo;
     }
     
-    // Remap centroids to sorted order for better looking codebook
-    std::vector<std::pair<float, int>> sorted_centroids(k);
-    for (int i=0; i<k; ++i) sorted_centroids[i] = {centroids[i], i};
-    std::sort(sorted_centroids.begin(), sorted_centroids.end());
-    
-    std::vector<float> final_centroids(k);
-    std::vector<int> mapping(k);
-    for (int i=0; i<k; ++i) {
-        final_centroids[i] = sorted_centroids[i].first;
-        mapping[sorted_centroids[i].second] = i;
-    }
-    
-    for (size_t i=0; i<labels.size(); ++i) {
-        labels[i] = mapping[labels[i]];
-    }
-    
-    return {final_centroids, labels};
+    return {finalCentroids, labels};
 }
 
 #include <nanoflann.hpp>
@@ -249,25 +340,6 @@ SogEncoder::SogEncoder(const GaussianCloud& cloud, const Options& options)
     padded_count_ = width_ * height_;
 }
 
-SogEncoder::SogEncoder(const GaussianCloud& cloud, const std::vector<size_t>& subset_indices, const Options& options)
-    : cloud_(cloud), options_(options) {
-    indices_.reserve(subset_indices.size());
-    for (size_t idx : subset_indices) {
-        indices_.push_back((uint32_t)idx);
-    }
-
-    // Auto-calculate dimensions based on subset count
-    float count = (float)indices_.size();
-    if (options.width_hint > 0) {
-        width_ = options.width_hint; 
-    } else {
-        width_ = std::ceil(std::sqrt(count) / 4.0f) * 4.0f;
-        if (width_ < 4) width_ = 4;
-    }
-    height_ = std::ceil(count / width_ / 4.0f) * 4.0f;
-    if (height_ < 4) height_ = 4;
-    padded_count_ = width_ * height_;
-}
 
 void SogEncoder::compute_morton_indices() {
     if (indices_.empty()) return;
@@ -404,7 +476,9 @@ nlohmann::json SogEncoder::encode_positions() {
         means_u[i * 4 + 3] = 0xff;
     }
 
+    std::cout << "writing 'means_l.webp'..." << std::endl;
     write_webp("means_l.webp", means_l.data(), width_, height_);
+    std::cout << "writing 'means_u.webp'..." << std::endl;
     write_webp("means_u.webp", means_u.data(), width_, height_);
     
     return {
@@ -460,31 +534,12 @@ void SogEncoder::encode_quaternions() {
         quats_data[i * 4 + 3] = 0;
     }
 
+    std::cout << "writing 'quats.webp'..." << std::endl;
     write_webp("quats.webp", quats_data.data(), width_, height_);
 }
 
 nlohmann::json SogEncoder::encode_scales() {
-    // Collect data for each axis
-    std::vector<float> s0(cloud_.size()), s1(cloud_.size()), s2(cloud_.size());
-    #pragma omp parallel for
-    for (size_t i = 0; i < cloud_.size(); ++i) {
-        s0[i] = cloud_.scales(i, 0);
-        s1[i] = cloud_.scales(i, 1);
-        s2[i] = cloud_.scales(i, 2);
-    }
-    
-    // K-Means for each axis (256 clusters)
-    auto km0 = kmeans1d(s0, 256, options_.k_means_iterations);
-    auto km1 = kmeans1d(s1, 256, options_.k_means_iterations);
-    auto km2 = kmeans1d(s2, 256, options_.k_means_iterations);
-    
-    // Flatten codebooks into one array
-    std::vector<float> codebook;
-    codebook.insert(codebook.end(), km0.centroids.begin(), km0.centroids.end());
-    codebook.insert(codebook.end(), km1.centroids.begin(), km1.centroids.end());
-    codebook.insert(codebook.end(), km2.centroids.begin(), km2.centroids.end());
-    
-    // Pool all scale values together, cluster them, and use the same codebook for x, y, z.
+    // Pool all scale values together and quantize with a shared codebook for x, y, z.
     
     std::vector<float> all_scales;
     all_scales.reserve(cloud_.size() * 3);
@@ -494,7 +549,8 @@ nlohmann::json SogEncoder::encode_scales() {
         all_scales.push_back(cloud_.scales(i, 2));
     }
     
-    auto km_scales = kmeans1d(all_scales, 256, options_.k_means_iterations);
+    // Quantize 1D with alpha=0.5 (density weighting)
+    auto km_scales = quantize1d(all_scales, 256, 0.5f);
     
     // Now map original values to labels
     std::vector<uint8_t> scales_data(width_ * height_ * 4, 0);
@@ -521,6 +577,7 @@ nlohmann::json SogEncoder::encode_scales() {
         scales_data[i * 4 + 3] = 255;
     }
 
+    std::cout << "writing 'scales.webp'..." << std::endl;
     write_webp("scales.webp", scales_data.data(), width_, height_);
     
     return {
@@ -540,7 +597,7 @@ nlohmann::json SogEncoder::encode_colors() {
         all_colors.push_back(cloud_.sh_dc(i, 2));
     }
     
-    auto km_colors = kmeans1d(all_colors, 256, options_.k_means_iterations);
+    auto km_colors = quantize1d(all_colors, 256, 0.5f);
     
     std::vector<uint8_t> colors_data(width_ * height_ * 4, 0);
 
@@ -568,6 +625,7 @@ nlohmann::json SogEncoder::encode_colors() {
         colors_data[i * 4 + 3] = 0; // Transparent
     }
 
+    std::cout << "writing 'sh0.webp'..." << std::endl;
     write_webp("sh0.webp", colors_data.data(), width_, height_);
     
      return {
@@ -585,15 +643,17 @@ nlohmann::json SogEncoder::encode_sh() {
 
     if (cloud_.size() < 1024) palette_size = 256; 
     
-    std::cout << "Clustering SH with " << palette_size << " clusters..." << std::endl;
     
     int sh_coeffs = cloud_.sh_rest.cols() / 3;
     if (sh_coeffs == 0) return nullptr;
     
-    std::cout << "Compressing SH: " << cloud_.sh_rest.rows() << " points, " << cloud_.sh_rest.cols() << " dims." << std::endl;
+    std::cout << "Running k-means clustering: dims=" << cloud_.sh_rest.cols() 
+              << " points=" << cloud_.sh_rest.rows() 
+              << " clusters=" << palette_size 
+              << " iterations=" << options_.sh_iterations << "..." << std::endl;
 
     // Run Vector K-Means
-    auto km_sh = kmeans_vec(cloud_.sh_rest, palette_size, cloud_.sh_rest.cols(), options_.k_means_iterations);
+    auto km_sh = kmeans_vec(cloud_.sh_rest, palette_size, cloud_.sh_rest.cols(), options_.sh_iterations);
     
     // Write Centroids Texture
     // Layout: Rows of 64 centroids. Each centroid spans `shCoeffs` pixels horizontally.
@@ -608,7 +668,7 @@ nlohmann::json SogEncoder::encode_sh() {
     std::vector<uint8_t> centroid_data(tex_width * tex_height * 4, 0);
     
     // Step 1: Flatten centroids and run 1D k-means (256 clusters).
-    auto km_codebook = kmeans1d(km_sh.centroids, 256, options_.k_means_iterations);
+    auto km_codebook = quantize1d(km_sh.centroids, 256, 0.5f);
     
     // Step 2: Write centroids texture using labels from km_codebook.
     // km_codebook.labels maps EACH FLOAT in the flattened centroids array to a codebook index.
@@ -643,6 +703,7 @@ nlohmann::json SogEncoder::encode_sh() {
         }
     }
     
+    std::cout << "writing 'shN_centroids.webp'..." << std::endl;
     write_webp("shN_centroids.webp", centroid_data.data(), tex_width, tex_height);
     
     // Write Labels Texture for points
@@ -664,6 +725,7 @@ nlohmann::json SogEncoder::encode_sh() {
         label_data[ti * 4 + 3] = 255;
     }
 
+    std::cout << "writing 'shN_labels.webp'..." << std::endl;
     write_webp("shN_labels.webp", label_data.data(), width_, height_);
 
     return {
@@ -675,13 +737,31 @@ nlohmann::json SogEncoder::encode_sh() {
 }
 
 void SogEncoder::encode() {
+    int total_steps = (cloud_.sh_rest.cols() > 0) ? 8 : 6;
+    int step = 1;
+    
+    std::cout << "[" << step++ << "/" << total_steps << "] Generating morton order" << std::endl;
     compute_morton_indices();
     
+    std::cout << "[" << step++ << "/" << total_steps << "] Writing positions" << std::endl;
     nlohmann::json meta_pos = encode_positions();
+    
+    std::cout << "[" << step++ << "/" << total_steps << "] Writing quaternions" << std::endl;
     encode_quaternions();
+    
+    std::cout << "[" << step++ << "/" << total_steps << "] Compressing scales" << std::endl;
     nlohmann::json meta_scales = encode_scales();
+    
+    std::cout << "[" << step++ << "/" << total_steps << "] Compressing colors" << std::endl;
     nlohmann::json meta_colors = encode_colors();
-    nlohmann::json meta_sh = encode_sh();
+
+    nlohmann::json meta_sh = nullptr;
+    if (cloud_.sh_rest.cols() > 0) {
+        std::cout << "[" << step++ << "/" << total_steps << "] Compressing spherical harmonics" << std::endl;
+        meta_sh = encode_sh();
+    }
+    
+    std::cout << "[" << step++ << "/" << total_steps << "] Finalizing" << std::endl;
     
     nlohmann::json meta = {
         {"version", 2},
