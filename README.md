@@ -38,10 +38,24 @@ sudo apt-get install build-essential cmake libeigen3-dev libwebp-dev pkg-config
     make
     ```
 
-4.  Run the converter:
-    ```bash
-    ./ply-to-sog <input_ply> <output_sog> [--bundle] [--k-means-iter <N>]
-    ```
-    
-    - `--bundle`: Create a single `.sog` file (zip archive).
-    - `--k-means-iter <N>`: Set K-Means iterations (default: 2). Higher values (e.g., 10) improve compression quality.
+## Usage
+
+```bash
+./ply-to-sog <input.ply> <output.sog> [--bundle] [--sh-iter <N>]
+```
+
+### Options
+
+- **`--bundle`**: Creates a single `.sog` file (uncompressed zip archive) containing the manifest and data textures. If omitted, creates a directory structure.
+- **`--sh-iter <N>`**: Sets the number of K-Means iterations for Spherical Harmonics (SH) vector clustering (default: 10). Higher values improve SH quality but increase encoding time.
+
+
+### Example
+
+```bash
+# Basic conversion
+./ply-to-sog input.ply output.sog --bundle
+
+# High quality SH encoding
+./ply-to-sog input.ply output.sog --bundle --sh-iter 50
+```
