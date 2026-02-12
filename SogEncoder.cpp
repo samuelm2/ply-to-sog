@@ -133,7 +133,7 @@ KMeansResult1D quantize1d(const std::vector<float>& data, int k, float alpha = 0
     for (double c : counts) if (c > 0) nonEmpty++;
     int effectiveK = std::min(k, nonEmpty);
     
-    const double INF = 1e30;
+    const double INF = std::numeric_limits<double>::infinity();
     std::vector<double> dpPrev(H, INF);
     std::vector<double> dpCurr(H, INF);
     std::vector<std::vector<int>> splitTable(effectiveK + 1, std::vector<int>(H, 0));
