@@ -144,26 +144,40 @@ KMeansResult1D quantize1d(const std::vector<float>& data, int k, float alpha = 0
         splitTable[1][j] = -1;
     }
     
-    // k = 2..effectiveK — O(K * H^2) with O(1) range cost queries
-    for (int m = 2; m <= effectiveK; ++m) {
-        #pragma omp parallel for
-        for (int j = m - 1; j < H; ++j) {
-            double bestCost = INF;
-            int bestS = m - 2;
-            
-            for (int s = m - 2; s < j; ++s) {
-                double cost = dpPrev[s] + rq.cost(s + 1, j);
-                if (cost < bestCost) {
-                    bestCost = cost;
-                    bestS = s;
-                }
+    // Divide-and-conquer DP optimization.
+    // The cost function satisfies the quadrangle inequality, so optimal split
+    // points are monotone: opt(j) <= opt(j+1). This reduces each DP row from
+    // O(H²) to O(H log H).
+    std::function<void(int, int, int, int, std::vector<double>&, std::vector<int>&)> solve_dc;
+    solve_dc = [&](int jlo, int jhi, int slo, int shi,
+                    std::vector<double>& dp_row, std::vector<int>& split_row) {
+        if (jlo > jhi) return;
+        int jmid = (jlo + jhi) / 2;
+        
+        double bestCost = INF;
+        int bestS = slo;
+        int s_end = std::min(shi, jmid - 1);
+        
+        for (int s = slo; s <= s_end; ++s) {
+            double cost = dpPrev[s] + rq.cost(s + 1, jmid);
+            if (cost < bestCost) {
+                bestCost = cost;
+                bestS = s;
             }
-            dpCurr[j] = bestCost;
-            splitTable[m][j] = bestS;
         }
         
-        dpPrev = dpCurr;
+        dp_row[jmid] = bestCost;
+        split_row[jmid] = bestS;
+        
+        solve_dc(jlo, jmid - 1, slo, bestS, dp_row, split_row);
+        solve_dc(jmid + 1, jhi, bestS, shi, dp_row, split_row);
+    };
+    
+    // k = 2..effectiveK — O(K × H × log H) via divide-and-conquer
+    for (int m = 2; m <= effectiveK; ++m) {
         std::fill(dpCurr.begin(), dpCurr.end(), INF);
+        solve_dc(m - 1, H - 1, m - 2, H - 2, dpCurr, splitTable[m]);
+        std::swap(dpPrev, dpCurr);
     }
     
     // 5. Backtrack centroids
