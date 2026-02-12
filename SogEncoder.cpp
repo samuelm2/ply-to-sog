@@ -48,10 +48,8 @@ KMeansResult1D kmeans1d(const std::vector<float>& data, int k, int iterations = 
     if (data.empty()) return {};
     k = std::min(k, (int)data.size()); // clamp k
     
-    // Initialize centroids (k-means++ ish or random)
+    // Initialize centroids using quantiles
     std::vector<float> centroids(k);
-    
-    // Simple init: quantiles
     std::vector<float> sorted_sample = data;
     std::sort(sorted_sample.begin(), sorted_sample.end());
     for (int i=0; i<k; ++i) {
@@ -135,7 +133,7 @@ struct CentroidPointCloud {
     bool kdtree_get_bbox(BBOX& /*bb*/) const { return false; }
 };
 
-using MyKdTree = nanoflann::KDTreeSingleIndexAdaptor<
+using CentroidKdTree = nanoflann::KDTreeSingleIndexAdaptor<
     nanoflann::L2_Simple_Adaptor<float, CentroidPointCloud>,
     CentroidPointCloud,
     -1 // runtime dim
@@ -170,7 +168,7 @@ KMeansResultVec kmeans_vec(const Eigen::MatrixXf& data, int k, int dim, int iter
     for (int iter = 0; iter < iterations; ++iter) {
         // Build KD-Tree on centroids
         CentroidPointCloud point_cloud(centroids, dim, k);
-        MyKdTree index(dim, point_cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+        CentroidKdTree index(dim, point_cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10 /* max leaf */));
         index.buildIndex();
 
         // Assignment step using KD-tree
@@ -387,7 +385,6 @@ nlohmann::json SogEncoder::encode_positions() {
         uint16_t y = (uint16_t)(65535.0f * (log_pos[idx](1) - min_log(1)) / range(1));
         uint16_t z = (uint16_t)(65535.0f * (log_pos[idx](2) - min_log(2)) / range(2));
         
-        // Layout: Identity (no block swizzling for now as per reference code comments saying "no packing")
         size_t ti = i; 
         
         means_l[ti * 4 + 0] = x & 0xff;
@@ -440,7 +437,6 @@ void SogEncoder::encode_quaternions() {
         if (q(max_comp) < 0) q = -q;
         
         // Drop max component and scale by sqrt(2)
-        // Indices map based on max_comp (same as TS code)
         int idx0, idx1, idx2;
         if (max_comp == 0) { idx0=1; idx1=2; idx2=3; }
         else if (max_comp == 1) { idx0=0; idx1=2; idx2=3; }
@@ -461,7 +457,7 @@ void SogEncoder::encode_quaternions() {
     
     // Padding
     for (size_t i = cloud_.size(); i < padded_count_; ++i) {
-        quats_data[i * 4 + 3] = 0; // Default tag? Or 255. TS code seems to use 252+comp, default logic handles invalid tags as identity.
+        quats_data[i * 4 + 3] = 0;
     }
 
     write_webp("quats.webp", quats_data.data(), width_, height_);
@@ -478,25 +474,17 @@ nlohmann::json SogEncoder::encode_scales() {
     }
     
     // K-Means for each axis (256 clusters)
-    auto km0 = kmeans1d(s0, 256, options_.sh_iterations);
-    auto km1 = kmeans1d(s1, 256, options_.sh_iterations);
-    auto km2 = kmeans1d(s2, 256, options_.sh_iterations);
+    auto km0 = kmeans1d(s0, 256, options_.k_means_iterations);
+    auto km1 = kmeans1d(s1, 256, options_.k_means_iterations);
+    auto km2 = kmeans1d(s2, 256, options_.k_means_iterations);
     
     // Flatten codebooks into one array
     std::vector<float> codebook;
     codebook.insert(codebook.end(), km0.centroids.begin(), km0.centroids.end());
     codebook.insert(codebook.end(), km1.centroids.begin(), km1.centroids.end());
-    codebook.insert(codebook.end(), km2.centroids.begin(), km2.centroids.end()); // Wait, TS quantizes ALL scales together? 
-    // Checking TS code:
-    // const scaleData = quantize1d(new DataTable(['scale_0', 'scale_1', 'scale_2'].map(...)));
-    // quantize1d takes a DataTable. If it has multiple columns, it treats them as... a vector?
-    // "quantize1d" implies 1D...
-    // Let's re-read `read-sog.ts`.
-    // `meta.scales.codebook` is a single array.
-    // `columns[3].data[i] = sCode[sl[o]]`
-    // `columns[4].data[i] = sCode[sl[o + 1]]`
-    // It seems each component (sx, sy, sz) points to the SAME codebook.
-    // So we should pool all scale values together, cluster them, and use the same codebook for x, y, z.
+    codebook.insert(codebook.end(), km2.centroids.begin(), km2.centroids.end());
+    
+    // Pool all scale values together, cluster them, and use the same codebook for x, y, z.
     
     std::vector<float> all_scales;
     all_scales.reserve(cloud_.size() * 3);
@@ -506,27 +494,16 @@ nlohmann::json SogEncoder::encode_scales() {
         all_scales.push_back(cloud_.scales(i, 2));
     }
     
-    auto km_scales = kmeans1d(all_scales, 256, options_.sh_iterations);
+    auto km_scales = kmeans1d(all_scales, 256, options_.k_means_iterations);
     
     // Now map original values to labels
     std::vector<uint8_t> scales_data(width_ * height_ * 4, 0);
 
-    // Need a fast lookup map? Or just re-find nearest.
-    // Since we just ran k-means, we can just re-assign. Or better, `kmeans1d` returns labels for the input data.
-    // Since `all_scales` was structured as [s0_x, s0_y, s0_z, s1_x, ...], labels correspond linearly.
-    
     #pragma omp parallel for
     for (size_t i = 0; i < cloud_.size(); ++i) {
         size_t idx = indices_[i];
         
-        // Find labels for s[idx]
-        // Since we did pool, labels are in `km_scales.labels`.
-        // The indices in `all_scales` were linear: 0,1,2 for gaussian 0, etc.
-        // Wait, `all_scales` order was just simple push_back.
-        // But we need to use `indices_` for the output texture order.
-        
-        // We need the label for `cloud_.scales(idx, 0)`.
-        // The label is in `km_scales.labels[idx * 3 + 0]`.
+        // We need the label for `cloud_.scales(idx, 0)` which corresponds to `km_scales.labels[idx * 3 + 0]`.
         
         uint8_t l0 = km_scales.labels[idx * 3 + 0];
         uint8_t l1 = km_scales.labels[idx * 3 + 1];
@@ -553,9 +530,7 @@ nlohmann::json SogEncoder::encode_scales() {
 }
 
 nlohmann::json SogEncoder::encode_colors() {
-    // Similar to scales, but for DC colors. Pooled or separate?
-    // TS code: `quantize1d(new DataTable(['f_dc_0', 'f_dc_1', 'f_dc_2']))`
-    // Yes, pooled.
+    // Cluster all DC components together
     
     std::vector<float> all_colors;
     all_colors.reserve(cloud_.size() * 3);
@@ -565,7 +540,7 @@ nlohmann::json SogEncoder::encode_colors() {
         all_colors.push_back(cloud_.sh_dc(i, 2));
     }
     
-    auto km_colors = kmeans1d(all_colors, 256, options_.sh_iterations);
+    auto km_colors = kmeans1d(all_colors, 256, options_.k_means_iterations);
     
     std::vector<uint8_t> colors_data(width_ * height_ * 4, 0);
 
@@ -606,10 +581,8 @@ nlohmann::json SogEncoder::encode_sh() {
     
     // Adaptive palette size
     int palette_size = std::min(64, (int)std::pow(2, std::floor(std::log2(cloud_.size() / 1024.0)))) * 1024;
-    palette_size = std::max(1024, palette_size); // Ensure at least 1024? TS code says min(64, ...)*1024, if small clouds, pow can be small.
-    // TS: Math.min(64, 2 ** Math.floor(Math.log2(indices.length / 1024))) * 1024;
-    // If length < 1024, log2 is negative, floor is negative, 2**neg is small.
-    // e.g. 500 points -> floor(log2(0.48)) = -2 -> 0.25 -> 256. 
+    palette_size = std::max(1024, palette_size); 
+
     if (cloud_.size() < 1024) palette_size = 256; 
     
     std::cout << "Clustering SH with " << palette_size << " clusters..." << std::endl;
@@ -617,20 +590,12 @@ nlohmann::json SogEncoder::encode_sh() {
     int sh_coeffs = cloud_.sh_rest.cols() / 3;
     if (sh_coeffs == 0) return nullptr;
     
-    // Determined by options or input size.
-    // If input has 45 columns (Band 3), but we want fewer?
-    // Let's stick to input size unless forced?
-    // JS tool seems to default to Band 2 (8 coeffs)?
-    // Let's just process what we have, but ensure we don't crash if 45.
-    
     std::cout << "Compressing SH: " << cloud_.sh_rest.rows() << " points, " << cloud_.sh_rest.cols() << " dims." << std::endl;
 
     // Run Vector K-Means
-    auto km_sh = kmeans_vec(cloud_.sh_rest, palette_size, cloud_.sh_rest.cols(), options_.sh_iterations);
+    auto km_sh = kmeans_vec(cloud_.sh_rest, palette_size, cloud_.sh_rest.cols(), options_.k_means_iterations);
     
     // Write Centroids Texture
-    // 64 * shCoeffs width, ceil(numRows/64) height.
-    // Texture stores centroids.
     // Layout: Rows of 64 centroids. Each centroid spans `shCoeffs` pixels horizontally.
     // Pixel (x, y) contains (c_r, c_g, c_b, 0xff).
     
@@ -642,25 +607,11 @@ nlohmann::json SogEncoder::encode_sh() {
     
     std::vector<uint8_t> centroid_data(tex_width * tex_height * 4, 0);
     
-    // Quantize centroids (quantize1d in TS code).
-    // TS: const codebook = quantize1d(centroids);
-    // This implies 1D quantization of the centroid values themselves to 8-bit?
-    // "Quantizing spherical harmonics" step in TS.
-    // Yes, `quantize1d` on the centroids table. 
-    // So the centroids texture stores INDICES into a codebook?
-    // TS: `centroidsBuf[i ...] = x` where x comes from `centroidsRow`.
-    // `centroidsRow` comes from `codebook.labels`.
-    // So yes, the SH centroids themselves are quantized to 8-bit via a codebook.
-    
     // Step 1: Flatten centroids and run 1D k-means (256 clusters).
-    auto km_codebook = kmeans1d(km_sh.centroids, 256, options_.sh_iterations);
+    auto km_codebook = kmeans1d(km_sh.centroids, 256, options_.k_means_iterations);
     
     // Step 2: Write centroids texture using labels from km_codebook.
-    // km_sh.centroids is flattened: [C0_d0, C0_d1, ... C0_dN, C1_d0, ...]
-    // km_codebook.labels maps each float to a byte.
-    
     // km_codebook.labels maps EACH FLOAT in the flattened centroids array to a codebook index.
-    // km_sh.centroids has size `palette_size * cloud_.sh_rest.cols()`.
     
     // We need to write these labels into the texture.
     int num_centroids = km_sh.centroids.size() / cloud_.sh_rest.cols();
@@ -669,13 +620,6 @@ nlohmann::json SogEncoder::encode_sh() {
         for (int j = 0; j < target_coeffs; ++j) {
             // Each centroid has `target_coeffs` * 3 values.
             // Stored in texture as `target_coeffs` pixels.
-            // Pixel j corresponds to (R, G, B) = (coeff_j, coeff_j+N, coeff_j+2N)
-            // But from flattened centroid array which has length `input_coeffs * 3`.
-            
-            // If we are truncating, we only read the first `target_coeffs` from each block?
-            // Wait, km_sh was run on `cloud_.sh_rest`. If that is 45 dims, centroids are 45 dims.
-            // If we want 24 dims output, do we just drop the rest?
-            // Used `input_coeffs` for striding.
             
             int offset = i * cloud_.sh_rest.cols();
             uint8_t r = km_codebook.labels[offset + j];

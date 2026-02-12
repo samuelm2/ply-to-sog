@@ -14,7 +14,7 @@ void print_usage() {
     std::cout << "Usage: ply-to-sog <input.ply> <output_path> [options]\n";
     std::cout << "Options:\n";
     std::cout << "  --bundle       Create a bundled .sog file (zip)\n";
-    std::cout << "  --sh-iter <N>  K-Means iterations for SH (default: 2)\n";
+    std::cout << "  --k-means-iter <N>  K-Means iterations for SH/Scales/Colors (default: 2, recommended: 50+)\n";
 }
 
 int main(int argc, char** argv) {
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--bundle") {
             bundle = true;
-        } else if (arg == "--sh-iter" && i + 1 < argc) {
+        } else if (arg == "--k-means-iter" && i + 1 < argc) {
             sh_iter = std::stoi(argv[++i]);
         }
     }
@@ -47,22 +47,30 @@ int main(int argc, char** argv) {
         
         fs::path out_dir; 
         if (bundle) {
-            // Create a temporary directory for files
-            out_dir = fs::path(output_path).parent_path() / ("tmp_" + fs::path(output_path).stem().string());
+            // Check if output zip already exists
+            if (fs::exists(output_path)) {
+                throw std::runtime_error("Output file already exists: " + output_path);
+            }
+
+            // Create a unique temporary directory for files
+            auto now = std::chrono::system_clock::now().time_since_epoch().count();
+            out_dir = fs::path(output_path).parent_path() / ("tmp_" + fs::path(output_path).stem().string() + "_" + std::to_string(now));
+            fs::create_directories(out_dir);
+
         } else {
             out_dir = output_path;
+            // Check if output directory already exists and is not empty
+            if (fs::exists(out_dir) && !fs::is_empty(out_dir)) {
+                throw std::runtime_error("Output directory already exists and is not empty: " + output_path);
+            }
+            fs::create_directories(out_dir);
         }
-
-        if (fs::exists(out_dir)) {
-            fs::remove_all(out_dir);
-        }
-        fs::create_directories(out_dir);
 
         // Standard bundle/unbundle
         SogEncoder::Options options;
         options.output_path = out_dir.string();
         options.bundle = bundle;
-        options.sh_iterations = sh_iter;
+        options.k_means_iterations = sh_iter;
         
         std::cout << "Encoding to " << (bundle ? "bundled SOG" : "SOG directory") << "..." << std::endl;
         SogEncoder encoder(cloud, options);

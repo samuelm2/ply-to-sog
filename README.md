@@ -40,5 +40,8 @@ sudo apt-get install build-essential cmake libeigen3-dev libwebp-dev pkg-config
 
 4.  Run the converter:
     ```bash
-    ./ply-to-sog <input_ply> <output_sog>
+    ./ply-to-sog <input_ply> <output_sog> [--bundle] [--k-means-iter <N>]
     ```
+    
+    - `--bundle`: Create a single `.sog` file (zip archive).
+    - `--k-means-iter <N>`: Set K-Means iterations (default: 2). Higher values (e.g., 10) improve compression quality.

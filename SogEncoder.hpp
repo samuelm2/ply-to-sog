@@ -15,7 +15,7 @@ public:
     struct Options {
         std::string output_path;
         bool bundle = false;
-        int sh_iterations = 2; // K-means iterations (default low for speed)
+        int k_means_iterations = 2; // K-means iterations (default low for speed)
         int width_hint = 0; // 0 = auto
     };
 
