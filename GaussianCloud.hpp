@@ -144,9 +144,7 @@ struct GaussianCloud {
         std::string line;
         int vertex_count = 0;
         std::map<std::string, std::string> property_types;
-        std::map<std::string, int> property_offsets; // byte offset valid for mixed types if we did that, but assume all float for splats usually?
-        // Actually, splats are often all floats, but rotation/scale are often just float.
-        // Standard Gaussian Splat PLY: x,y,z, nx,ny,nz, f_dc_0,1,2, f_rest_..., opacity, scale_0,1,2, rot_0,1,2,3
+        std::map<std::string, int> property_offsets; 
         
         std::vector<std::string> properties_in_order;
         
@@ -183,12 +181,7 @@ struct GaussianCloud {
         }
         cloud.sh_rest.resize(vertex_count, f_rest_count);
 
-        // Read Data
-        // Assumes all data is float32 (standard for these PLYs)
-        // If not, would need more complex parsing. 
-        // We will read vertex by vertex.
-        
-        // Mapping from property index to destination
+        // Map PLY properties to internal storage
         struct PropTarget {
             enum Type { POS, SCALE, ROT, OPACITY, SH_DC, SH_REST, IGNORE };
             Type type;
@@ -219,10 +212,9 @@ struct GaussianCloud {
             targets.push_back(t);
         }
 
-        // Read all data into a buffer first for speed? Or simpler loop.
-        // vertices * props * 4 bytes. 
+        // Read Data (assumes all data is float32)
         size_t props_per_vertex = properties_in_order.size();
-        std::vector<float> vertex_buffer(props_per_vertex); // buffer for one vertex
+        std::vector<float> vertex_buffer(props_per_vertex); 
 
         for (int i = 0; i < vertex_count; ++i) {
              file.read(reinterpret_cast<char*>(vertex_buffer.data()), props_per_vertex * sizeof(float));
@@ -234,6 +226,7 @@ struct GaussianCloud {
                  float val = vertex_buffer[p];
                  const auto& target = targets[p];
                  
+                 // Map property directly to cloud storage
                  switch (target.type) {
                      case PropTarget::POS: cloud.positions(i, target.index) = val; break;
                      case PropTarget::SCALE: cloud.scales(i, target.index) = val; break;
@@ -245,12 +238,6 @@ struct GaussianCloud {
                  }
              }
         }
-        
-        // Normalize quaternions if needed? Usually input is normalized. 
-        // But let's ensure exp(scale) or sigmoid(opacity) is handled in Encoder, not here.
-        // PLY usually stores raw values. 
-        // Vanilla 3DGS stores opacity as logit, scale as log. 
-        // SOG expects positions, rotations active, subset, etc. 
         
         return cloud;
     }
