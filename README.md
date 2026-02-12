@@ -59,3 +59,7 @@ sudo apt-get install build-essential cmake libeigen3-dev libwebp-dev pkg-config
 # High quality SH encoding
 ./ply-to-sog input.ply output.sog --bundle --sh-iter 50
 ```
+
+## Acknowledgements
+
+This tool is a C++ port and optimization of sog conversion portion of the [PlayCanvas splat-transform](https://github.com/playcanvas/splat-transform) tool. It implements the same SOG (Splat Object Geometry) encoding format but is built for performance and native integration.
