@@ -62,4 +62,4 @@ sudo apt-get install build-essential cmake libeigen3-dev libwebp-dev pkg-config
 
 ## Acknowledgements
 
-This tool is a C++ port and optimization of sog conversion portion of the [PlayCanvas splat-transform](https://github.com/playcanvas/splat-transform) tool. It implements the same SOG (Splat Object Geometry) encoding format but is built for performance and native integration.
+This tool is a C++ port and optimization of sog conversion portion of the [PlayCanvas splat-transform](https://github.com/playcanvas/splat-transform) tool. It implements the same SOG (Spatially Ordered Gaussians) encoding format but is built native integration. Thank you to PlayCanvas for this awesome splat format!
