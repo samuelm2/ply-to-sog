@@ -15,6 +15,7 @@ public:
     struct Options {
         std::string output_path;
         bool bundle = false;
+        bool sort = true;      // If true, reorders by Morton code. If false, assumes input is already sorted.
         int sh_iterations = 10;    // K-means iterations for SH vectors (default lower for speed)
         int width_hint = 0; // 0 = auto
     };
@@ -24,6 +25,9 @@ public:
     
     // Main entry point
     void encode();
+
+    // Static helper for Morton encoding
+    static uint32_t morton3D(float x, float y, float z, const Eigen::Vector3f& min, const Eigen::Vector3f& max);
 
 private:
     const GaussianCloud& cloud_;

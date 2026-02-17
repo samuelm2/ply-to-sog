@@ -16,28 +16,6 @@ inline float sigmoid(float x) {
     return 1.0f / (1.0f + std::exp(-x));
 }
 
-// Morton Code Implementation (interleave bits)
-// 10 bits per axis -> 30 bits total
-inline uint32_t expand_bits(uint32_t v) {
-    v = (v * 0x00010001u) & 0xFF0000FFu;
-    v = (v * 0x00000101u) & 0x0F00F00Fu;
-    v = (v * 0x00000011u) & 0xC30C30C3u;
-    v = (v * 0x00000005u) & 0x49249249u;
-    return v;
-}
-
-inline uint32_t morton3D(float x, float y, float z, const Eigen::Vector3f& min, const Eigen::Vector3f& max) {
-    float x_norm = std::clamp((x - min.x()) / (max.x() - min.x()), 0.0f, 1.0f);
-    float y_norm = std::clamp((y - min.y()) / (max.y() - min.y()), 0.0f, 1.0f);
-    float z_norm = std::clamp((z - min.z()) / (max.z() - min.z()), 0.0f, 1.0f);
-    
-    uint32_t xx = expand_bits((uint32_t)(x_norm * 1023.0f));
-    uint32_t yy = expand_bits((uint32_t)(y_norm * 1023.0f));
-    uint32_t zz = expand_bits((uint32_t)(z_norm * 1023.0f));
-    
-    return xx * 4 + yy * 2 + zz;
-}
-
 // Quantize 1D using DP (Optimal 1D K-Means)
 struct KMeansResult1D {
     std::vector<float> centroids;
@@ -328,10 +306,30 @@ KMeansResultVec kmeans_vec(const Eigen::MatrixXf& data, int k, int dim, int iter
             }
         }
     }
-    
     return {centroids, labels};
 }
 
+// Morton Code Implementation (interleave bits)
+// 10 bits per axis -> 30 bits total
+inline uint32_t expand_bits(uint32_t v) {
+    v = (v * 0x00010001u) & 0xFF0000FFu;
+    v = (v * 0x00000101u) & 0x0F00F00Fu;
+    v = (v * 0x00000011u) & 0xC30C30C3u;
+    v = (v * 0x00000005u) & 0x49249249u;
+    return v;
+}
+
+uint32_t SogEncoder::morton3D(float x, float y, float z, const Eigen::Vector3f& min, const Eigen::Vector3f& max) {
+    float x_norm = std::clamp((x - min.x()) / (max.x() - min.x()), 0.0f, 1.0f);
+    float y_norm = std::clamp((y - min.y()) / (max.y() - min.y()), 0.0f, 1.0f);
+    float z_norm = std::clamp((z - min.z()) / (max.z() - min.z()), 0.0f, 1.0f);
+    
+    uint32_t xx = expand_bits((uint32_t)(x_norm * 1023.0f));
+    uint32_t yy = expand_bits((uint32_t)(y_norm * 1023.0f));
+    uint32_t zz = expand_bits((uint32_t)(z_norm * 1023.0f));
+    
+    return xx * 4 + yy * 2 + zz;
+}
 
 SogEncoder::SogEncoder(const GaussianCloud& cloud, const Options& options)
     : cloud_(cloud), options_(options) {
@@ -395,7 +393,8 @@ void SogEncoder::compute_morton_indices() {
     #pragma omp parallel for
     for (size_t i = 0; i < cloud_.size(); ++i) {
         morton[i].index = i;
-        morton[i].code = morton3D(cloud_.positions(i, 0), cloud_.positions(i, 1), cloud_.positions(i, 2), min, max);
+        // Use static method
+        morton[i].code = SogEncoder::morton3D(cloud_.positions(i, 0), cloud_.positions(i, 1), cloud_.positions(i, 2), min, max);
     }
     
     std::sort(morton.begin(), morton.end(), [](const IndexedMorton& a, const IndexedMorton& b) {
@@ -755,7 +754,9 @@ void SogEncoder::encode() {
     int step = 1;
     
     std::cout << "[" << step++ << "/" << total_steps << "] Generating morton order" << std::endl;
-    compute_morton_indices();
+    if (options_.sort) {
+        compute_morton_indices();
+    }
     
     std::cout << "[" << step++ << "/" << total_steps << "] Writing positions" << std::endl;
     nlohmann::json meta_pos = encode_positions();
