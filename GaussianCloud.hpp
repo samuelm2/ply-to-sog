@@ -132,6 +132,31 @@ struct GaussianCloud {
              sh_rest.bottomRows(other_n) = other.sh_rest;
         }
     }
+
+    // Filter Spherical Harmonics
+    void filter_harmonics(int max_sh_degree) {
+        int keep_cols = 0;
+        if (max_sh_degree <= 0) {
+            keep_cols = 0;
+        } else if (max_sh_degree == 1) {
+            keep_cols = 9;
+        } else if (max_sh_degree == 2) {
+            keep_cols = 24;
+        } else {
+            // max_sh_degree >= 3, keep everything (up to 45)
+            return;
+        }
+
+        if (sh_rest.cols() > keep_cols) {
+            // Truncate columns
+            // Eigen matrices are column-major by default? Or row-major?
+            // MatrixXf is usually ColumnMajor, but here we treat rows as points.
+            // conservativeResize on columns preserves data?
+            // "The resized matrix will contain the upper-left corner of the original matrix."
+            // So resizing columns will keep the first `keep_cols` columns.
+            sh_rest.conservativeResize(Eigen::NoChange, keep_cols);
+        }
+    }
     
     // Load from PLY
     static GaussianCloud load_ply(const std::string& filename) {

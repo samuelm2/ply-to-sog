@@ -18,6 +18,7 @@ void print_usage() {
     std::cout << "  --sh-iter      <N>  K-Means iterations for SH clustering (default: 10)\n";
     std::cout << "  --chunk-count  <N>  Target count per chunk in K (default: 512)\n";
     std::cout << "  --chunk-extent <N>  Target size in world units (default: 16)\n";
+    std::cout << "  -H, --filter-harmonics <N> Set max SH degree (0, 1, 2, 3). Default: keep all\n";
 }
 
 struct InputFile {
@@ -37,6 +38,7 @@ int main(int argc, char** argv) {
     int sh_iter = 10;
     int chunk_count = 512;
     int chunk_extent = 16;
+    int max_sh_degree = -1; // -1 = keep all
     
     // Parse arguments manually to handle mixed positional and optional args
     // Heuristic: Last positional arg is output.
@@ -59,6 +61,8 @@ int main(int argc, char** argv) {
              if (i + 1 < args.size()) chunk_count = std::stoi(args[++i]);
          } else if (args[i] == "--chunk-extent" || args[i] == "-X") {
              if (i + 1 < args.size()) chunk_extent = std::stoi(args[++i]);
+         } else if (args[i] == "--filter-harmonics" || args[i] == "-H") {
+             if (i + 1 < args.size()) max_sh_degree = std::stoi(args[++i]);
          } else if (args[i] == "-l" || args[i] == "--lod") {
              if (i + 1 < args.size()) {
                  int lod = std::stoi(args[++i]);
@@ -112,6 +116,11 @@ int main(int argc, char** argv) {
         }
         
         std::cout << "Total loaded: " << merged_cloud.size() << " gaussians" << std::endl;
+        
+        if (max_sh_degree >= 0) {
+            std::cout << "Filtering SH to degree " << max_sh_degree << "..." << std::endl;
+            merged_cloud.filter_harmonics(max_sh_degree);
+        }
         
         // Mode 1: Multi-LOD Chunked Export
         if (inputs.size() > 1 || fs::path(output_path).extension() == ".json") {
