@@ -56,7 +56,13 @@ std::unique_ptr<LodExporter::Node> LodExporter::build_tree(std::vector<uint32_t>
     int target_count = options_.chunk_count * 1024;
     float target_extent = (float)options_.chunk_extent;
     
-    // Check split criteria
+    // Stop splitting if node is small enough (matches splat-transform behavior)
+    if (indices.size() <= 256) {
+        node->indices = std::move(indices);
+        return node;
+    }
+
+    // Check split criteria (target chunk size/extent)
     if (node->count <= target_count && node->bounds.largest_dim() <= target_extent) {
         node->indices = std::move(indices);
         return node;
@@ -100,30 +106,90 @@ struct LodExporter::ChunkingState {
 nlohmann::json LodExporter::process_node(Node* node, ChunkingState& state) {
     nlohmann::json json;
     
-    // Bounds
-    std::vector<float> min = {node->bounds.min.x(), node->bounds.min.y(), node->bounds.min.z()};
-    std::vector<float> max = {node->bounds.max.x(), node->bounds.max.y(), node->bounds.max.z()};
-    json["bound"] = {
-        {"min", min},
-        {"max", max}
-    };
-    
+    // Recursive case: Internal Node
     if (!node->is_leaf()) {
         json["children"] = nlohmann::json::array();
-        json["children"].push_back(process_node(node->left.get(), state));
-        json["children"].push_back(process_node(node->right.get(), state));
+        
+        nlohmann::json left_json = process_node(node->left.get(), state);
+        nlohmann::json right_json = process_node(node->right.get(), state);
+        
+        json["children"].push_back(left_json);
+        json["children"].push_back(right_json);
+        
+        // Compute union of children bounds for this node
+        std::vector<float> min = {
+            std::min((float)left_json["bound"]["min"][0], (float)right_json["bound"]["min"][0]),
+            std::min((float)left_json["bound"]["min"][1], (float)right_json["bound"]["min"][1]),
+            std::min((float)left_json["bound"]["min"][2], (float)right_json["bound"]["min"][2])
+        };
+        std::vector<float> max = {
+            std::max((float)left_json["bound"]["max"][0], (float)right_json["bound"]["max"][0]),
+            std::max((float)left_json["bound"]["max"][1], (float)right_json["bound"]["max"][1]),
+            std::max((float)left_json["bound"]["max"][2], (float)right_json["bound"]["max"][2])
+        };
+        
+        json["bound"] = {
+            {"min", min},
+            {"max", max}
+        };
+        
         return json;
     }
     
-    // Leaf node: bin indices by LOD
+    // Base case: Leaf Node
+    // Bin indices AND compute full bounds
     std::map<int, std::vector<uint32_t>> bins;
+    
+    // Initialize bounds with inverted infinity
+    Eigen::Vector3f min_b(1e30f, 1e30f, 1e30f);
+    Eigen::Vector3f max_b(-1e30f, -1e30f, -1e30f);
+    
+    // Bounds can be computed in parallel if node is large, but usually nodes are small (<=256 or so)
+    // For safety with std::map access, we keep this serial or use thread-local storage.
+    // Given the small node size, serial is fine.
+    
     for (uint32_t idx : node->indices) {
+        // 1. Binning
         int lod = 0;
         if (!lods_.empty()) {
             lod = lods_[idx];
         }
         bins[lod].push_back(idx);
+        
+        // 2. Bounds Calculation (Full Extent)
+        Eigen::Vector3f p = cloud_.positions.row(idx);
+        Eigen::Vector3f s = cloud_.scales.row(idx);
+        // Exponentiate scales (log-scale in PLY)
+        s = Eigen::Vector3f(std::exp(s.x()), std::exp(s.y()), std::exp(s.z()));
+        
+        Eigen::Vector4f q_raw = cloud_.rotations.row(idx);
+        Eigen::Quaternionf q(q_raw(0), q_raw(1), q_raw(2), q_raw(3));
+        q.normalize();
+        Eigen::Matrix3f R = q.toRotationMatrix();
+        
+        // Radius along axes = Sum(|R_ij| * s_j)
+        // R * Diagonal(s)
+        // But for AABB radius, we want:
+        // Rx = |R00|sx + |R01|sy + |R02|sz
+        // Ry = |R10|sx + |R11|sy + |R12|sz
+        // Rz = |R20|sx + |R21|sy + |R22|sz
+        
+        Eigen::Vector3f radius;
+        radius.x() = std::abs(R(0,0))*s.x() + std::abs(R(0,1))*s.y() + std::abs(R(0,2))*s.z();
+        radius.y() = std::abs(R(1,0))*s.x() + std::abs(R(1,1))*s.y() + std::abs(R(1,2))*s.z();
+        radius.z() = std::abs(R(2,0))*s.x() + std::abs(R(2,1))*s.y() + std::abs(R(2,2))*s.z();
+        
+        min_b = min_b.cwiseMin(p - radius);
+        max_b = max_b.cwiseMax(p + radius);
     }
+    
+    // Store calculated bounds
+    std::vector<float> min_vec = {min_b.x(), min_b.y(), min_b.z()};
+    std::vector<float> max_vec = {max_b.x(), max_b.y(), max_b.z()};
+    json["bound"] = {
+        {"min", min_vec},
+        {"max", max_vec}
+    };
     
     nlohmann::json lods_json = nlohmann::json::object();
     int target_bin_size = options_.chunk_count * 1024;
