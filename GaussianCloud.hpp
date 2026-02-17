@@ -135,27 +135,57 @@ struct GaussianCloud {
 
     // Filter Spherical Harmonics
     void filter_harmonics(int max_sh_degree) {
-        int keep_cols = 0;
+        // sh_rest is stored Planar: [R0..Rn][G0..Gn][B0..Bn]
+        // Standard 3DGS (Degree 3) has 15 coeffs per channel.
+        // n_input_coeffs per channel = sh_rest.cols() / 3.
+        
+        int current_cols = sh_rest.cols();
+        if (current_cols == 0) return;
+        
+        int input_coeffs_per_channel = current_cols / 3;
+        
+        int target_coeffs_per_channel = 0;
         if (max_sh_degree <= 0) {
-            keep_cols = 0;
+            target_coeffs_per_channel = 0;
         } else if (max_sh_degree == 1) {
-            keep_cols = 9;
+            target_coeffs_per_channel = 3;
         } else if (max_sh_degree == 2) {
-            keep_cols = 24;
+            target_coeffs_per_channel = 8;
         } else {
-            // max_sh_degree >= 3, keep everything (up to 45)
+            // max_sh_degree >= 3 (or whatever input is), keep everything
             return;
         }
 
-        if (sh_rest.cols() > keep_cols) {
-            // Truncate columns
-            // Eigen matrices are column-major by default? Or row-major?
-            // MatrixXf is usually ColumnMajor, but here we treat rows as points.
-            // conservativeResize on columns preserves data?
-            // "The resized matrix will contain the upper-left corner of the original matrix."
-            // So resizing columns will keep the first `keep_cols` columns.
-            sh_rest.conservativeResize(Eigen::NoChange, keep_cols);
-        }
+        if (target_coeffs_per_channel >= input_coeffs_per_channel) return;
+        
+        // We need to pack:
+        // [R_keep] [G_keep] [B_keep]
+        // From:
+        // [R_in ...R_waste] [G_in ...G_waste] [B_in ...B_waste]
+        
+        // Block 0 (Red): Already at 0, size target_coeffs_per_channel. No move needed.
+        
+        // Block 1 (Green):
+        // Old Start: input_coeffs_per_channel
+        // New Start: target_coeffs_per_channel
+        int r_src_start = 0;
+        int g_src_start = input_coeffs_per_channel;
+        int b_src_start = input_coeffs_per_channel * 2;
+        
+        int r_dst_start = 0;
+        int g_dst_start = target_coeffs_per_channel;
+        int b_dst_start = target_coeffs_per_channel * 2;
+        
+        // Move Green
+        sh_rest.block(0, g_dst_start, size(), target_coeffs_per_channel) = 
+            sh_rest.block(0, g_src_start, size(), target_coeffs_per_channel);
+            
+        // Move Blue
+        sh_rest.block(0, b_dst_start, size(), target_coeffs_per_channel) = 
+            sh_rest.block(0, b_src_start, size(), target_coeffs_per_channel);
+            
+        // Resize final
+        sh_rest.conservativeResize(Eigen::NoChange, target_coeffs_per_channel * 3);
     }
     
     // Load from PLY
