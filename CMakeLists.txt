@@ -15,6 +15,7 @@ pkg_check_modules(WebP REQUIRED libwebp)
 add_executable(ply-to-sog
     main.cpp
     SogEncoder.cpp
+    LodExporter.cpp
     dependencies/miniz.c
 )
 
