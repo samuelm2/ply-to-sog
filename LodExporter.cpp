@@ -271,8 +271,44 @@ void LodExporter::export_lods() {
             // Flatten indices
             std::vector<size_t> flat_indices;
             flat_indices.reserve(bucket.current_size);
-            for (const auto& chunk : bucket.chunks) {
-                flat_indices.insert(flat_indices.end(), chunk.begin(), chunk.end());
+            
+            for (auto& chunk : bucket.chunks) {
+                // Sort chunk by Morton Order locally (using chunk bounds)
+                if (chunk.empty()) continue;
+                
+                // Compute bounds for this chunk
+                Eigen::Vector3f min(1e30f, 1e30f, 1e30f);
+                Eigen::Vector3f max(-1e30f, -1e30f, -1e30f);
+                for (uint32_t idx : chunk) {
+                    Eigen::Vector3f p = cloud_.positions.row(idx);
+                    min = min.cwiseMin(p);
+                    max = max.cwiseMax(p);
+                }
+                // Expand slightly
+                min.array() -= 0.01f;
+                max.array() += 0.01f;
+                
+                struct IndexedMorton {
+                    uint32_t index;
+                    uint32_t code;
+                };
+                std::vector<IndexedMorton> morton(chunk.size());
+                
+                for (size_t k = 0; k < chunk.size(); ++k) {
+                    uint32_t idx = chunk[k];
+                    morton[k].index = idx;
+                    Eigen::Vector3f p = cloud_.positions.row(idx);
+                    morton[k].code = SogEncoder::morton3D(p.x(), p.y(), p.z(), min, max);
+                }
+                
+                std::sort(morton.begin(), morton.end(), [](const IndexedMorton& a, const IndexedMorton& b) {
+                    return a.code < b.code;
+                });
+                
+                // Append sorted indices to flat list
+                for (const auto& m : morton) {
+                    flat_indices.push_back(m.index);
+                }
             }
             
             // Create subset
@@ -286,6 +322,7 @@ void LodExporter::export_lods() {
             enc_opts.output_path = sub_dir.string();
             enc_opts.sh_iterations = options_.sh_iterations;
             enc_opts.bundle = false; // Sub-chunks are always unbundled directories
+            enc_opts.sort = false;   // Disable global sort, use our local chunked sort order
             
             // Encode
             std::cout << "  Writing " << sub_dir << " (" << flat_indices.size() << " points)" << std::endl;
