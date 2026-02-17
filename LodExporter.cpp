@@ -13,17 +13,21 @@ LodExporter::LodExporter(const GaussianCloud& cloud, const std::vector<uint8_t>&
 }
 
 LodExporter::Aabb LodExporter::compute_bounds(const std::vector<uint32_t>& indices) const {
+    float max_val = std::numeric_limits<float>::max();
+    float lowest_val = std::numeric_limits<float>::lowest();
     Aabb bounds = {
-        {1e30f, 1e30f, 1e30f},
-        {-1e30f, -1e30f, -1e30f}
+        {max_val, max_val, max_val},
+        {lowest_val, lowest_val, lowest_val}
     };
     
     // Compute bounds in parallel for large sets
     if (indices.size() > 10000) {
         #pragma omp parallel
         {
-            Eigen::Vector3f local_min(1e30f, 1e30f, 1e30f);
-            Eigen::Vector3f local_max(-1e30f, -1e30f, -1e30f);
+            float max_val = std::numeric_limits<float>::max();
+            float lowest_val = std::numeric_limits<float>::lowest();
+            Eigen::Vector3f local_min(max_val, max_val, max_val);
+            Eigen::Vector3f local_max(lowest_val, lowest_val, lowest_val);
             
             #pragma omp for
             for (size_t i = 0; i < indices.size(); ++i) {
@@ -141,8 +145,9 @@ nlohmann::json LodExporter::process_node(Node* node, ChunkingState& state) {
     std::map<int, std::vector<uint32_t>> bins;
     
     // Initialize bounds with inverted infinity
-    Eigen::Vector3f min_b(1e30f, 1e30f, 1e30f);
-    Eigen::Vector3f max_b(-1e30f, -1e30f, -1e30f);
+    float inf = std::numeric_limits<float>::max();
+    Eigen::Vector3f min_b(inf, inf, inf);
+    Eigen::Vector3f max_b(-inf, -inf, -inf);
     
     // Bounds can be computed in parallel if node is large, but usually nodes are small (<=256 or so)
     // For safety with std::map access, we keep this serial or use thread-local storage.
@@ -168,24 +173,33 @@ nlohmann::json LodExporter::process_node(Node* node, ChunkingState& state) {
         Eigen::Matrix3f R = q.toRotationMatrix();
         
         // Radius along axes = Sum(|R_ij| * s_j)
-        // R * Diagonal(s)
-        // But for AABB radius, we want:
-        // Rx = |R00|sx + |R01|sy + |R02|sz
-        // Ry = |R10|sx + |R11|sy + |R12|sz
-        // Rz = |R20|sx + |R21|sy + |R22|sz
-        
         Eigen::Vector3f radius;
         radius.x() = std::abs(R(0,0))*s.x() + std::abs(R(0,1))*s.y() + std::abs(R(0,2))*s.z();
         radius.y() = std::abs(R(1,0))*s.x() + std::abs(R(1,1))*s.y() + std::abs(R(1,2))*s.z();
         radius.z() = std::abs(R(2,0))*s.x() + std::abs(R(2,1))*s.y() + std::abs(R(2,2))*s.z();
         
-        min_b = min_b.cwiseMin(p - radius);
-        max_b = max_b.cwiseMax(p + radius);
+        Eigen::Vector3f local_min = p - radius;
+        Eigen::Vector3f local_max = p + radius;
+
+        // Skip invalid bounds (NaN/Inf) to match splat-transform robustness
+        if (!std::isfinite(local_min.x()) || !std::isfinite(local_min.y()) || !std::isfinite(local_min.z()) ||
+            !std::isfinite(local_max.x()) || !std::isfinite(local_max.y()) || !std::isfinite(local_max.z())) {
+            continue;
+        }
+        
+        min_b = min_b.cwiseMin(local_min);
+        max_b = max_b.cwiseMax(local_max);
     }
     
-    // Store calculated bounds
-    std::vector<float> min_vec = {min_b.x(), min_b.y(), min_b.z()};
-    std::vector<float> max_vec = {max_b.x(), max_b.y(), max_b.z()};
+    // Handle case where all points were invalid
+    std::vector<float> min_vec, max_vec;
+    if (min_b.x() > max_b.x()) {
+         min_vec = {0,0,0};
+         max_vec = {0,0,0};
+    } else {
+         min_vec = {min_b.x(), min_b.y(), min_b.z()};
+         max_vec = {max_b.x(), max_b.y(), max_b.z()};
+    }
     json["bound"] = {
         {"min", min_vec},
         {"max", max_vec}
